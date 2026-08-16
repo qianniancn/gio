@@ -244,6 +244,7 @@ const (
 
 	MDT_EFFECTIVE_DPI = 0
 
+	MONITOR_DEFAULTTONULL    = 0
 	MONITOR_DEFAULTTOPRIMARY = 1
 
 	NI_COMPOSITIONSTR = 0x0015
@@ -451,7 +452,7 @@ var (
 	_LoadCursor                  = user32.NewProc("LoadCursorW")
 	_LoadImage                   = user32.NewProc("LoadImageW")
 	_MonitorFromPoint            = user32.NewProc("MonitorFromPoint")
-	_MonitorFromWindow           = user32.NewProc("MonitorFromWindow")
+	_MonitorFromRect             = user32.NewProc("MonitorFromRect")
 	_MoveWindow                  = user32.NewProc("MoveWindow")
 	_MsgWaitForMultipleObjectsEx = user32.NewProc("MsgWaitForMultipleObjectsEx")
 	_OpenClipboard               = user32.NewProc("OpenClipboard")
@@ -710,12 +711,15 @@ func GetWindowPlacement(hwnd syscall.Handle) WindowPlacement {
 	return wp
 }
 
-func GetMonitorInfo(hwnd syscall.Handle) MonitorInfo {
+func GetMonitorInfo(r Rect, flags uint32) (MonitorInfo, bool) {
+	monitor, _, _ := _MonitorFromRect.Call(uintptr(unsafe.Pointer(&r)), uintptr(flags))
+	if monitor == 0 {
+		return MonitorInfo{}, false
+	}
 	var mi MonitorInfo
 	mi.cbSize = uint32(unsafe.Sizeof(mi))
-	v, _, _ := _MonitorFromWindow.Call(uintptr(hwnd), MONITOR_DEFAULTTOPRIMARY)
-	_GetMonitorInfo.Call(v, uintptr(unsafe.Pointer(&mi)))
-	return mi
+	_GetMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&mi)))
+	return mi, true
 }
 
 func GetWindowLong(hwnd syscall.Handle, index uintptr) (val uintptr) {

@@ -373,7 +373,10 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 		// state. See https://devblogs.microsoft.com/oldnewthing/20150304-00/?p=44543.
 		// Note that trying to do the adjustment in WM_GETMINMAXINFO is ignored by Windows.
 		szp := (*windows.NCCalcSizeParams)(unsafe.Pointer(lParam))
-		mi := windows.GetMonitorInfo(w.hwnd)
+		mi, ok := windows.GetMonitorInfo(szp.Rgrc[0], windows.MONITOR_DEFAULTTONULL)
+		if !ok {
+			return 0
+		}
 		szp.Rgrc[0] = mi.WorkArea
 		return 0
 	case windows.WM_PAINT:
@@ -1021,7 +1024,11 @@ func (w *window) Perform(acts system.Action) {
 			dx := r.Right - r.Left
 			dy := r.Bottom - r.Top
 			// Center in the usable area of the current monitor.
-			area := windows.GetMonitorInfo(w.hwnd).WorkArea
+			mi, ok := windows.GetMonitorInfo(r, windows.MONITOR_DEFAULTTONULL)
+			if !ok {
+				break
+			}
+			area := mi.WorkArea
 			x := (area.Right + area.Left - dx) / 2
 			y := (area.Bottom + area.Top - dy) / 2
 			windows.SetWindowPos(w.hwnd, 0, x, y, dx, dy, windows.SWP_NOZORDER|windows.SWP_FRAMECHANGED)
