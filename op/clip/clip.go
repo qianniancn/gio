@@ -116,6 +116,20 @@ type PathSpec struct {
 	hash        uint64
 }
 
+// PathCache stores path data for reuse across frames.
+// Call Begin again when the path geometry changes.
+type PathCache struct {
+	ops op.Ops
+}
+
+// Begin starts a new path and invalidates any previously returned PathSpec.
+func (c *PathCache) Begin() Path {
+	c.ops.Reset()
+	var p Path
+	p.Begin(&c.ops)
+	return p
+}
+
 // Path constructs a Op clip path described by lines and
 // Bézier curves, where drawing outside the Path is discarded.
 // The inside-ness of a pixel is determines by the non-zero winding rule,
