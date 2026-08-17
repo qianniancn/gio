@@ -669,6 +669,9 @@ func (w *Window) processEvent(e event.Event) bool {
 		e2.Config = w.effectiveConfig()
 		w.coalesced.cfg = &e2
 		if f := w.decorations.Config.Focused; f != wasFocused {
+			if !f {
+				w.queue.Queue(pointer.Event{Kind: pointer.Cancel})
+			}
 			w.queue.Queue(key.FocusEvent{Focus: f})
 		}
 		t, handled := w.queue.WakeupTime()
