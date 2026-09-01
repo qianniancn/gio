@@ -52,8 +52,9 @@ type window struct {
 	borderSize image.Point
 	config     Config
 	// frameDims stores the last seen window frame width and height.
-	frameDims image.Point
-	loop      *eventLoop
+	frameDims  image.Point
+	loop       *eventLoop
+	allowClose bool
 }
 
 const _WM_WAKEUP = windows.WM_USER + iota
@@ -338,6 +339,13 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 		np := windows.Point{X: int32(x), Y: int32(y)}
 		windows.ScreenToClient(w.hwnd, &np)
 		return w.hitTest(int(np.X), int(np.Y))
+	case windows.WM_CLOSE:
+		if w.allowClose {
+			w.allowClose = false
+			break
+		}
+		w.ProcessEvent(CloseRequestEvent{})
+		return 0
 	case windows.WM_POINTERWHEEL:
 		w.scrollEvent(wParam, lParam, false, getModifiers())
 	case windows.WM_POINTERHWHEEL:
@@ -1044,7 +1052,10 @@ func (w *window) Perform(acts system.Action) {
 			windows.SetWindowPos(w.hwnd, windows.HWND_TOP, 0, 0, 0, 0,
 				windows.SWP_NOMOVE|windows.SWP_NOSIZE|windows.SWP_SHOWWINDOW)
 		case system.ActionClose:
-			windows.PostMessage(w.hwnd, windows.WM_CLOSE, 0, 0)
+			w.allowClose = true
+			if err := windows.PostMessage(w.hwnd, windows.WM_CLOSE, 0, 0); err != nil {
+				w.allowClose = false
+			}
 		}
 	})
 }

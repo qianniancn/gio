@@ -575,7 +575,7 @@ func gio_onXdgSurfaceConfigure(data unsafe.Pointer, wmSurf *C.struct_xdg_surface
 //export gio_onToplevelClose
 func gio_onToplevelClose(data unsafe.Pointer, topLvl *C.struct_xdg_toplevel) {
 	w := callbackLoad(data).(*window)
-	w.closing = true
+	w.ProcessEvent(CloseRequestEvent{})
 }
 
 //export gio_onToplevelConfigure
@@ -1171,6 +1171,8 @@ func (w *window) Perform(actions system.Action) {
 		switch action {
 		case system.ActionClose:
 			w.closing = true
+			// Wake the event loop so the close takes effect right away.
+			w.disp.wakeup()
 		}
 	})
 }

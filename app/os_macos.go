@@ -365,6 +365,7 @@ type window struct {
 	cursor      pointer.Cursor
 	pointerBtns pointer.Buttons
 	loop        *eventLoop
+	allowClose  bool
 	lastMods    C.NSUInteger
 
 	scale  float32
@@ -538,6 +539,7 @@ func (w *window) Perform(acts system.Action) {
 		}
 	})
 	if acts&system.ActionClose != 0 {
+		w.allowClose = true
 		C.closeWindow(window)
 	}
 }
@@ -999,6 +1001,17 @@ func gio_onDestroy(h C.uintptr_t) {
 	w.displayLink = nil
 	cgo.Handle(h).Delete()
 	w.view = 0
+}
+
+//export gio_onCloseRequest
+func gio_onCloseRequest(h C.uintptr_t) C.int {
+	w := windowFor(h)
+	if w.allowClose {
+		w.allowClose = false
+		return 1
+	}
+	w.ProcessEvent(CloseRequestEvent{})
+	return 0
 }
 
 //export gio_onFinishLaunching

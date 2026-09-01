@@ -115,6 +115,7 @@ type eventSummary struct {
 	view         *ViewEvent
 	frame        *frameEvent
 	framePending bool
+	closeRequest *CloseRequestEvent
 	destroy      *DestroyEvent
 }
 
@@ -579,6 +580,10 @@ func (w *Window) nextEvent() (event.Event, bool) {
 		e := *s.view
 		s.view = nil
 		return e, true
+	case s.closeRequest != nil:
+		e := *s.closeRequest
+		s.closeRequest = nil
+		return e, true
 	case s.destroy != nil:
 		e := *s.destroy
 		// Clear pending events after DestroyEvent is delivered.
@@ -654,6 +659,8 @@ func (w *Window) processEvent(e event.Event) bool {
 			<-q
 		}
 		w.coalesced.destroy = &e2
+	case CloseRequestEvent:
+		w.coalesced.closeRequest = &e2
 	case ViewEvent:
 		if !e2.Valid() && w.gpu != nil {
 			w.ctx.Lock()
@@ -825,7 +832,13 @@ func (w *Window) decorate(e FrameEvent, o *op.Ops) image.Point {
 		w.driver.Configure(opts)
 	}
 	if acts != 0 {
-		w.driver.Perform(acts)
+		if acts&system.ActionClose != 0 {
+			acts &^= system.ActionClose
+			w.processEvent(CloseRequestEvent{})
+		}
+		if acts != 0 {
+			w.driver.Perform(acts)
+		}
 	}
 	style.Layout(gtx)
 	// Offset to place the frame content below the decorations.

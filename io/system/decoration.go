@@ -33,7 +33,7 @@ const (
 	// ActionCenter centers the window on the screen.
 	// It is ignored in Fullscreen mode and on Wayland.
 	ActionCenter
-	// ActionClose closes a window.
+	// ActionClose closes a window. It also confirms a pending app.CloseRequestEvent.
 	// Only applicable on macOS, Windows, X11 and Wayland.
 	ActionClose
 	// ActionMove moves a window directed by the user.

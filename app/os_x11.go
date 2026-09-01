@@ -106,8 +106,9 @@ type x11Window struct {
 	clipboard struct {
 		content []byte
 	}
-	cursor pointer.Cursor
-	config Config
+	cursor     pointer.Cursor
+	config     Config
+	allowClose bool
 
 	wakeups chan struct{}
 	handler x11EventHandler
@@ -335,6 +336,7 @@ func (w *x11Window) EditorStateChanged(old, new editorState) {}
 
 // close the window.
 func (w *x11Window) close() {
+	w.allowClose = true
 	var xev C.XEvent
 	ev := (*C.XClientMessageEvent)(unsafe.Pointer(&xev))
 	*ev = C.XClientMessageEvent{
@@ -348,6 +350,7 @@ func (w *x11Window) close() {
 	arr[0] = C.long(w.atoms.evDelWindow)
 	arr[1] = C.CurrentTime
 	C.XSendEvent(w.x, w.xw, C.False, C.NoEventMask, &xev)
+	C.XFlush(w.x)
 }
 
 // action is one of _NET_WM_STATE_REMOVE, _NET_WM_STATE_ADD.
@@ -740,8 +743,13 @@ func (h *x11EventHandler) handleEvents() bool {
 			cevt := (*C.XClientMessageEvent)(unsafe.Pointer(xev))
 			switch *(*C.long)(unsafe.Pointer(&cevt.data)) {
 			case C.long(w.atoms.evDelWindow):
-				w.shutdown(nil)
-				return false
+				if w.allowClose {
+					w.allowClose = false
+					w.shutdown(nil)
+					return false
+				}
+				w.ProcessEvent(CloseRequestEvent{})
+				return true
 			}
 		}
 	}
