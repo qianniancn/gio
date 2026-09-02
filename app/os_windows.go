@@ -1056,9 +1056,22 @@ func convertKeyCode(code uintptr) (key.Name, bool) {
 	if '0' <= code && code <= '9' || 'A' <= code && code <= 'Z' {
 		return key.Name(rune(code)), true
 	}
+	if windows.VK_NUMPAD0 <= code && code <= windows.VK_NUMPAD9 {
+		return key.Name('0' + rune(code-windows.VK_NUMPAD0)), true
+	}
 	var r key.Name
 
 	switch code {
+	case windows.VK_ADD:
+		r = "+"
+	case windows.VK_SUBTRACT:
+		r = "-"
+	case windows.VK_MULTIPLY:
+		r = "*"
+	case windows.VK_DIVIDE:
+		r = "/"
+	case windows.VK_DECIMAL:
+		r = "."
 	case windows.VK_ESCAPE:
 		r = key.NameEscape
 	case windows.VK_LEFT:
