@@ -511,18 +511,21 @@ func windowProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr
 	return windows.DefWindowProc(hwnd, msg, wParam, lParam)
 }
 
+// getModifiers reports the currently pressed modifier keys.
+// GetKeyState uses the high-order bit for the pressed state:
+// https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getkeystate
 func getModifiers() key.Modifiers {
 	var kmods key.Modifiers
-	if windows.GetKeyState(windows.VK_LWIN)&0x1000 != 0 || windows.GetKeyState(windows.VK_RWIN)&0x1000 != 0 {
+	if windows.GetKeyState(windows.VK_LWIN) < 0 || windows.GetKeyState(windows.VK_RWIN) < 0 {
 		kmods |= key.ModSuper
 	}
-	if windows.GetKeyState(windows.VK_MENU)&0x1000 != 0 {
+	if windows.GetKeyState(windows.VK_MENU) < 0 {
 		kmods |= key.ModAlt
 	}
-	if windows.GetKeyState(windows.VK_CONTROL)&0x1000 != 0 {
+	if windows.GetKeyState(windows.VK_CONTROL) < 0 {
 		kmods |= key.ModCtrl
 	}
-	if windows.GetKeyState(windows.VK_SHIFT)&0x1000 != 0 {
+	if windows.GetKeyState(windows.VK_SHIFT) < 0 {
 		kmods |= key.ModShift
 	}
 	return kmods
