@@ -179,6 +179,7 @@ type material struct {
 	data    imageOpData
 	tex     driver.Texture
 	uvTrans f32.Affine2D
+	mask    bool
 }
 
 const (
@@ -191,6 +192,8 @@ type imageOpData struct {
 	src    *image.RGBA
 	handle any
 	filter byte
+	mask   bool
+	tint   color.NRGBA
 }
 
 type linearGradientOpData struct {
@@ -210,6 +213,13 @@ func decodeImageOp(data []byte, refs []any) imageOpData {
 		handle: handle,
 		filter: data[1],
 	}
+}
+
+func decodeMaskOp(refs []any) imageOpData {
+	if len(refs) < 2 || refs[1] == nil {
+		return imageOpData{}
+	}
+	return imageOpData{src: refs[0].(*image.RGBA), handle: refs[1], mask: true}
 }
 
 func decodeColorOp(data []byte) color.NRGBA {
@@ -326,6 +336,7 @@ const (
 	materialColor materialType = iota
 	materialLinearGradient
 	materialTexture
+	materialMask
 )
 
 // New creates a GPU for the given API.
@@ -456,12 +467,16 @@ func (r *renderer) texHandle(cache *textureCache, data imageOpData) driver.Textu
 	var tex *texture
 	t, exists := cache.get(key)
 	if !exists {
+		if data.mask {
+			data.src = tintMask(data.src, data.tint)
+		}
 		t = &texture{
 			src: data.src,
 		}
 		cache.put(key, t)
 	}
 	tex = t.(*texture)
+	data.src = tex.src
 	if tex.tex != nil {
 		return tex.tex
 	}
@@ -665,11 +680,11 @@ func createColorPrograms(b driver.Device, vsSrc shader.Sources, fsSrc [3]shader.
 }
 
 func (r *renderer) stencilClips(pathCache *opCache, ops []*pathOp) {
+	r.pather.begin(r.packer.sizes)
 	if len(r.packer.sizes) == 0 {
 		return
 	}
 	fbo := -1
-	r.pather.begin(r.packer.sizes)
 	for _, p := range ops {
 		if fbo != p.place.Idx {
 			if fbo != -1 {
@@ -700,11 +715,11 @@ func (r *renderer) prepareIntersections(ops []imageOp) {
 }
 
 func (r *renderer) intersect(ops []imageOp) {
+	r.pather.stenciler.beginIntersect(r.intersections.sizes)
 	if len(r.intersections.sizes) == 0 {
 		return
 	}
 	fbo := -1
-	r.pather.stenciler.beginIntersect(r.intersections.sizes)
 	for _, img := range ops {
 		if img.clipType != clipTypeIntersection {
 			continue
@@ -829,6 +844,7 @@ func (r *renderer) packLayers(layers []opacityLayer) []opacityLayer {
 		// Only layers of the same depth may be packed together.
 		if l.depth != depth {
 			r.layers.newPage()
+			depth = l.depth
 		}
 		place, ok := r.layers.add(l.clip.Size())
 		if !ok {
@@ -842,11 +858,11 @@ func (r *renderer) packLayers(layers []opacityLayer) []opacityLayer {
 }
 
 func (r *renderer) drawLayers(layers []opacityLayer, ops []imageOp) {
+	r.layerFBOs.resize(r.ctx, driver.TextureFormatSRGBA, r.layers.sizes)
 	if len(r.layers.sizes) == 0 {
 		return
 	}
 	fbo := -1
-	r.layerFBOs.resize(r.ctx, driver.TextureFormatSRGBA, r.layers.sizes)
 	for _, l := range slices.Backward(layers) {
 
 		if fbo != l.place.Idx {
@@ -1074,6 +1090,9 @@ loop:
 		case ops.TypeImage:
 			state.matType = materialTexture
 			state.image = decodeImageOp(encOp.Data, encOp.Refs)
+		case ops.TypeMask:
+			state.matType = materialMask
+			state.image = decodeMaskOp(encOp.Refs)
 		case ops.TypePaint:
 			// Transform (if needed) the painting rectangle and if so generate a clip path,
 			// for those cases also compute a partialTrans that maps texture coordinates between
@@ -1083,7 +1102,7 @@ loop:
 			// TODO: Find a tighter bound.
 			inf := float32(1e6)
 			dst := f32.Rect(-inf, -inf, inf, inf)
-			if state.matType == materialTexture {
+			if state.matType == materialTexture || state.matType == materialMask {
 				sz := state.image.src.Rect.Size()
 				dst = f32.Rectangle{Max: layout.FPt(sz)}
 			}
@@ -1176,7 +1195,7 @@ func (d *drawState) materialFor(rect f32.Rectangle, off f32.Point, partTrans f32
 		m.opaque = m.color1.A == 1.0 && m.color2.A == 1.0
 
 		m.uvTrans = partTrans.Mul(gradientSpaceTransform(clip, off, d.stop1, d.stop2))
-	case materialTexture:
+	case materialTexture, materialMask:
 		m.material = materialTexture
 		dr := rect.Add(off).Round()
 		sz := d.image.src.Bounds().Size()
@@ -1197,8 +1216,30 @@ func (d *drawState) materialFor(rect f32.Rectangle, off f32.Point, partTrans f32
 		uvScale, uvOffset := texSpaceTransform(sr, sz)
 		m.uvTrans = partTrans.Mul(f32.AffineId().Scale(f32.Point{}, uvScale).Offset(uvOffset))
 		m.data = d.image
+		if d.matType == materialMask {
+			m.data.tint = d.color
+			m.data.handle = struct {
+				source any
+				color  color.NRGBA
+			}{d.image.handle, d.color}
+		}
 	}
 	return m
+}
+
+func tintMask(mask *image.RGBA, tint color.NRGBA) *image.RGBA {
+	if mask == nil {
+		return nil
+	}
+	img := image.NewRGBA(image.Rect(0, 0, mask.Bounds().Dx(), mask.Bounds().Dy()))
+	for y := range img.Bounds().Dy() {
+		for x := range img.Bounds().Dx() {
+			coverage := uint16(mask.RGBAAt(mask.Bounds().Min.X+x, mask.Bounds().Min.Y+y).A)
+			a := coverage * uint16(tint.A) / 255
+			img.SetRGBA(x, y, f32color.NRGBAToRGBA(color.NRGBA{R: tint.R, G: tint.G, B: tint.B, A: uint8(a)}))
+		}
+	}
+	return img
 }
 
 func (r *renderer) uploadImages(cache *textureCache, ops []imageOp) {

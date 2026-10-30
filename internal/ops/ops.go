@@ -77,6 +77,7 @@ const (
 	TypeSemanticSelected
 	TypeSemanticEnabled
 	TypeActionInput
+	TypeMask
 )
 
 type StackID struct {
@@ -132,6 +133,7 @@ const (
 	TypePopOpacityLen       = 1
 	TypeRedrawLen           = 1 + 8
 	TypeImageLen            = 1 + 1
+	TypeMaskLen             = 1 + 1
 	TypePaintLen            = 1
 	TypeColorLen            = 1 + 4
 	TypeLinearGradientLen   = 1 + 8*2 + 4*2
@@ -405,6 +407,7 @@ var opProps = [0x100]opProp{
 	TypePushOpacity:      {Size: TypePushOpacityLen, NumRefs: 0},
 	TypePopOpacity:       {Size: TypePopOpacityLen, NumRefs: 0},
 	TypeImage:            {Size: TypeImageLen, NumRefs: 2},
+	TypeMask:             {Size: TypeMaskLen, NumRefs: 2},
 	TypePaint:            {Size: TypePaintLen, NumRefs: 0},
 	TypeColor:            {Size: TypeColorLen, NumRefs: 0},
 	TypeLinearGradient:   {Size: TypeLinearGradientLen, NumRefs: 0},
@@ -459,6 +462,8 @@ func (t OpType) String() string {
 		return "PopOpacity"
 	case TypeImage:
 		return "Image"
+	case TypeMask:
+		return "Mask"
 	case TypePaint:
 		return "Paint"
 	case TypeColor:

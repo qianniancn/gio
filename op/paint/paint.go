@@ -38,6 +38,27 @@ type ImageOp struct {
 	handle any
 }
 
+// MaskOp sets the brush to an alpha coverage mask. The renderer applies the
+// current solid color to its coverage.
+type MaskOp struct {
+	src    *image.RGBA
+	handle any
+}
+
+// NewMaskOp creates a coverage mask backed by src.
+func NewMaskOp(src *image.RGBA) MaskOp {
+	return MaskOp{src: src, handle: new(int)}
+}
+
+// Add sets the current brush to the mask.
+func (m MaskOp) Add(o *op.Ops) {
+	if m.src == nil || m.src.Bounds().Empty() {
+		return
+	}
+	data := ops.Write2(&o.Internal, ops.TypeMaskLen, m.src, m.handle)
+	data[0] = byte(ops.TypeMask)
+}
+
 // ColorOp sets the brush to a constant color.
 type ColorOp struct {
 	Color color.NRGBA
@@ -61,6 +82,7 @@ type OpacityStack struct {
 	id      ops.StackID
 	macroID uint32
 	ops     *ops.Ops
+	layer   bool
 }
 
 // NewImageOp creates an ImageOp backed by src.
@@ -181,15 +203,22 @@ func PushOpacity(o *op.Ops, opacity float32) OpacityStack {
 		opacity = 0
 	}
 	id, macroID := ops.PushOp(&o.Internal, ops.OpacityStack)
+	// Keep stack validation, but an opaque group needs no offscreen surface.
+	if opacity == 1 {
+		return OpacityStack{ops: &o.Internal, id: id, macroID: macroID}
+	}
 	data := ops.Write(&o.Internal, ops.TypePushOpacityLen)
 	bo := binary.LittleEndian
 	data[0] = byte(ops.TypePushOpacity)
 	bo.PutUint32(data[1:], math.Float32bits(opacity))
-	return OpacityStack{ops: &o.Internal, id: id, macroID: macroID}
+	return OpacityStack{ops: &o.Internal, id: id, macroID: macroID, layer: true}
 }
 
 func (t OpacityStack) Pop() {
 	ops.PopOp(t.ops, ops.OpacityStack, t.id, t.macroID)
+	if !t.layer {
+		return
+	}
 	data := ops.Write(t.ops, ops.TypePopOpacityLen)
 	data[0] = byte(ops.TypePopOpacity)
 }

@@ -15,6 +15,59 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+func TestLayoutCacheBudget(t *testing.T) {
+	for _, backend := range []string{"native", "opentype"} {
+		t.Run(backend, func(t *testing.T) {
+			s := NewShaper()
+			if backend == "opentype" {
+				s = NewShaper(NoSystemFonts(), WithCollection(gofont.Collection()))
+			} else if _, ok := s.shaper.(*nativeShaper); !ok {
+				t.Skip("native text backend is unavailable")
+			}
+			s.layoutCache.maxBytes = 32 << 10
+			params := Parameters{PxPerEm: fixed.I(16), MaxWidth: 300}
+			shape := func(str string) []Glyph {
+				s.LayoutString(params, str)
+				glyphs := []Glyph{}
+				for g, ok := s.NextGlyph(); ok; g, ok = s.NextGlyph() {
+					// IDs may change when an uncached native font is collected.
+					g.ID, g.native = 0, nil
+					glyphs = append(glyphs, g)
+				}
+				return glyphs
+			}
+			want := shape("Reusable label")
+			for i := range 100 {
+				shape(fmt.Sprintf("Paragraph %d %s", i, strings.Repeat("wrapped text ", 5)))
+			}
+			if s.layoutCache.bytes > s.layoutCache.maxBytes {
+				t.Fatal("paragraphs exceeded the byte budget")
+			}
+			oldest, newest := false, false
+			for key := range s.layoutCache.m {
+				oldest = oldest || key.str == "Reusable label"
+				newest = newest || key.str == "Paragraph 99 "+strings.Repeat("wrapped text ", 5)
+			}
+			if oldest || !newest {
+				t.Fatal("byte pressure did not retain the recent paragraphs")
+			}
+			long := strings.Repeat("long paragraph ", 400)
+			first := shape(long)
+			for key := range s.layoutCache.m {
+				if key.str == long {
+					t.Fatal("oversized paragraph was cached")
+				}
+			}
+			if len(first) == 0 || !slices.Equal(first, shape(long)) {
+				t.Fatal("uncached paragraph layout changed")
+			}
+			if !slices.Equal(want, shape("Reusable label")) {
+				t.Fatal("layout changed after cache eviction")
+			}
+		})
+	}
+}
+
 // TestWrappingTruncation checks that the line wrapper's truncation features
 // behave as expected.
 func TestWrappingTruncation(t *testing.T) {

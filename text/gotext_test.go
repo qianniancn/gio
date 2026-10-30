@@ -18,6 +18,20 @@ import (
 	"gioui.org/io/system"
 )
 
+func TestDocumentResetReleasesLines(t *testing.T) {
+	doc := document{lines: []line{
+		{runs: []runLayout{{Glyphs: []glyph{{id: 1}}}}},
+		{runs: []runLayout{{Glyphs: []glyph{{id: 2}}}}},
+	}}
+	doc.reset()
+	doc.append(document{lines: []line{{}}})
+	for _, l := range doc.lines[len(doc.lines):cap(doc.lines)] {
+		if l.runs != nil || l.visualOrder != nil {
+			t.Fatal("shorter document retains previous lines")
+		}
+	}
+}
+
 var english = system.Locale{
 	Language:  "EN",
 	Direction: system.LTR,

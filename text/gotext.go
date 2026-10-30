@@ -50,6 +50,8 @@ func (l *document) append(other document) {
 
 // reset empties the document in preparation to reuse its memory.
 func (l *document) reset() {
+	// Reusing the outer slice must not keep runs from a longer document alive.
+	clear(l.lines)
 	l.lines = l.lines[:0]
 	l.alignment = Start
 	l.alignWidth = 0
@@ -149,6 +151,8 @@ type Range struct {
 
 // glyph contains the metadata needed to render a glyph.
 type glyph struct {
+	// native keeps the platform font alive while this layout is reusable.
+	native *nativeGlyph
 	// id is this glyph's identifier within the font it was shaped with.
 	id GlyphID
 	// clusterIndex is the identifier for the text shaping cluster that
@@ -633,8 +637,9 @@ func floatToFixed(f float32) fixed.Int26_6 {
 // The positioning of the bitmaps uses the same logic as Shape(), so the returned
 // CallOp can be added at the same offset as the path data returned by Shape()
 // and will align correctly.
-func (s *shaperImpl) Bitmaps(ops *op.Ops, gs []Glyph) op.CallOp {
+func (s *shaperImpl) Bitmaps(ops *op.Ops, gs []Glyph) (op.CallOp, int) {
 	var x fixed.Int26_6
+	var pixelBytes int
 	bitmapMacro := op.Record(ops)
 	for i, g := range gs {
 		if i == 0 {
@@ -674,6 +679,8 @@ func (s *shaperImpl) Bitmaps(ops *op.Ops, gs []Glyph) op.CallOp {
 				imgOp = bitmapData.img
 				imgSize = bitmapData.size
 			}
+			// Count shared images conservatively for each glyph reference.
+			pixelBytes += imgSize.X * imgSize.Y * 4
 			off := op.Affine(f32.AffineId().Offset(f32.Point{
 				X: fixedToFloat((g.X - x) + g.Offset.X),
 				Y: fixedToFloat(g.Offset.Y + g.Bounds.Min.Y),
@@ -701,7 +708,7 @@ func (s *shaperImpl) Bitmaps(ops *op.Ops, gs []Glyph) op.CallOp {
 			off.Pop()
 		}
 	}
-	return bitmapMacro.Stop()
+	return bitmapMacro.Stop(), pixelBytes
 }
 
 // langConfig describes the language and writing system of a body of text.

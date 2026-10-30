@@ -4,6 +4,7 @@ package text
 
 import (
 	"bufio"
+	"image/color"
 	"io"
 	"iter"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"gioui.org/io/system"
 	"gioui.org/op"
 	"gioui.org/op/clip"
+	nativetext "gioui.org/text/native"
 	"github.com/go-text/typesetting/font"
 	"golang.org/x/image/math/fixed"
 )
@@ -99,6 +101,8 @@ type FontFace = giofont.FontFace
 // in the upper-left corner" Displaying each shaped glyph at the document
 // coordinates of its dot will correctly visualize the text.
 type Glyph struct {
+	// native keeps a platform glyph usable after its layout leaves the cache.
+	native *nativeGlyph
 	// ID is a unique, per-shaper identifier for the shape of the glyph.
 	// Glyphs from the same shaper will share an ID when they are from
 	// the same face and represent the same glyph at the same size.
@@ -205,6 +209,16 @@ func (f Flags) String() string {
 
 type GlyphID uint64
 
+// shaperBackend provides the platform-dependent part of text shaping and
+// glyph rendering. Keeping this boundary separate from Shaper lets native
+// platform shapers expose the same glyph stream to widgets as the Go text
+// backend.
+type shaperBackend interface {
+	LayoutRunes(params Parameters, txt []rune) document
+	Shape(pathOps *op.Ops, gs []Glyph) clip.PathSpec
+	Bitmaps(ops *op.Ops, gs []Glyph) (op.CallOp, int)
+}
+
 // Shaper converts strings of text into glyphs that can be displayed. The same
 // Shaper should not be used in different goroutines.
 //
@@ -218,9 +232,12 @@ type Shaper struct {
 	config struct {
 		disableSystemFonts bool
 		collection         []FontFace
+		clearType          bool
+		clearText          color.NRGBA
+		clearBackground    color.NRGBA
 	}
 	initialized      bool
-	shaper           shaperImpl
+	shaper           shaperBackend
 	pathCache        pathCache
 	bitmapShapeCache bitmapShapeCache
 	layoutCache      layoutCache
@@ -260,6 +277,17 @@ func WithCollection(collection []FontFace) ShaperOption {
 	}
 }
 
+// WithClearType enables ClearType rasterization for text drawn over a known
+// opaque background. Both colors must be opaque. Unsupported platforms and
+// text rasterization modes fall back to grayscale coverage.
+func WithClearType(foreground, background color.NRGBA) ShaperOption {
+	return func(s *Shaper) {
+		s.config.clearType = foreground.A == 0xff && background.A == 0xff
+		s.config.clearText = foreground
+		s.config.clearBackground = background
+	}
+}
+
 // NewShaper constructs a shaper with the provided options.
 func NewShaper(options ...ShaperOption) *Shaper {
 	l := &Shaper{}
@@ -275,8 +303,17 @@ func (l *Shaper) init() {
 		return
 	}
 	l.initialized = true
+	// Entry count alone allows a few long paragraphs to retain large layouts.
+	l.layoutCache.maxBytes = 8 << 20
+	l.bitmapShapeCache.cache.maxBytes = 4 << 20
 	l.reader = bufio.NewReader(nil)
-	l.shaper = *newShaperImpl(!l.config.disableSystemFonts, l.config.collection)
+	if !l.config.disableSystemFonts && len(l.config.collection) == 0 {
+		if backend := newNativeShaper(nativetext.Shared(), nil, l.config.clearType, l.config.clearText, l.config.clearBackground); backend != nil {
+			l.shaper = backend
+			return
+		}
+	}
+	l.shaper = newShaperImpl(!l.config.disableSystemFonts, l.config.collection)
 }
 
 // Layout text from an io.Reader according to a set of options. Results can be retrieved by
@@ -417,6 +454,7 @@ func (l *Shaper) layoutText(params Parameters, str string, txt io.Reader) {
 				}
 			}
 		}
+		l.iterString = ""
 	} else {
 		for paragraph, isLast := range l.iterateParagraphByReader(txt) {
 			params.forceTruncate = truncating && !isLast
@@ -524,6 +562,7 @@ func (l *Shaper) NextGlyph() (_ Glyph, ok bool) {
 			runOffset = run.Advance - l.advance
 		}
 		glyph := Glyph{
+			native:  g.native,
 			ID:      g.id,
 			X:       align + run.X + runOffset,
 			Y:       int32(line.yOffset),
@@ -658,7 +697,7 @@ func (l *Shaper) Bitmaps(gs []Glyph) op.CallOp {
 		return call
 	}
 	callOps := new(op.Ops)
-	call = l.shaper.Bitmaps(callOps, gs)
-	l.bitmapShapeCache.Put(key, gs, call)
+	call, bytes := l.shaper.Bitmaps(callOps, gs)
+	l.bitmapShapeCache.PutCost(key, gs, call, bytes)
 	return call
 }

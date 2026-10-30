@@ -4,7 +4,9 @@ package text
 
 import (
 	"image"
+	"strings"
 	"sync/atomic"
+	"unsafe"
 
 	giofont "gioui.org/font"
 	"gioui.org/io/system"
@@ -19,12 +21,15 @@ type entry[K comparable, V any] struct {
 	next, prev *entry[K, V]
 	key        K
 	v          V
+	bytes      int
 }
 
 // lru is a generic least-recently-used cache.
 type lru[K comparable, V any] struct {
 	m          map[K]*entry[K, V]
 	head, tail *entry[K, V]
+	bytes      int
+	maxBytes   int
 }
 
 // Get fetches the value associated with the given key, if any.
@@ -41,6 +46,12 @@ func (l *lru[K, V]) Get(k K) (V, bool) {
 // Put inserts the given value with the given key, evicting old
 // cache entries if necessary.
 func (l *lru[K, V]) Put(k K, v V) {
+	l.PutCost(k, v, 0)
+}
+
+// PutCost bounds retained payload as well as entry count. A zero
+// maxBytes keeps a count-only policy.
+func (l *lru[K, V]) PutCost(k K, v V, bytes int) {
 	if l.m == nil {
 		l.m = make(map[K]*entry[K, V])
 		l.head = new(entry[K, V])
@@ -48,13 +59,28 @@ func (l *lru[K, V]) Put(k K, v V) {
 		l.head.prev = l.tail
 		l.tail.next = l.head
 	}
-	val := &entry[K, V]{key: k, v: v}
+	val := l.m[k]
+	if val != nil {
+		l.remove(val)
+		l.bytes -= val.bytes
+		delete(l.m, k)
+	}
+	// A large one-off value must not evict the useful working set.
+	if l.maxBytes > 0 && bytes > l.maxBytes {
+		return
+	}
+	if val == nil {
+		val = new(entry[K, V])
+	}
+	val.key, val.v, val.bytes = k, v, bytes
 	l.m[k] = val
 	l.insert(val)
-	if len(l.m) > maxSize {
+	l.bytes += bytes
+	for len(l.m) > maxSize || l.maxBytes > 0 && l.bytes > l.maxBytes {
 		oldest := l.tail.next
 		l.remove(oldest)
 		delete(l.m, oldest.key)
+		l.bytes -= oldest.bytes
 	}
 }
 
@@ -79,7 +105,38 @@ type bitmap struct {
 	size image.Point
 }
 
-type layoutCache = lru[layoutKey, document]
+type layoutCache struct {
+	lru[layoutKey, document]
+}
+
+func (c *layoutCache) Put(k layoutKey, v document) {
+	bytes := layoutBytes(k, v)
+	if c.maxBytes > 0 && bytes > c.maxBytes {
+		return
+	}
+	// Paragraphs are substrings of the input document. Own the cached keys
+	// so a short paragraph cannot retain an arbitrarily large source string.
+	k.str = strings.Clone(k.str)
+	k.truncator = strings.Clone(k.truncator)
+	k.font.Typeface = giofont.Typeface(strings.Clone(string(k.font.Typeface)))
+	k.locale.Language = strings.Clone(k.locale.Language)
+	c.PutCost(k, v, bytes)
+}
+
+// layoutBytes accounts for owned strings, slice capacities and entry metadata.
+// Shared fonts, allocator rounding and map bucket overhead are not included.
+func layoutBytes(k layoutKey, d document) int {
+	bytes := int(unsafe.Sizeof(entry[layoutKey, document]{})) + int(unsafe.Sizeof(k))
+	bytes += len(k.str) + len(k.truncator) + len(k.font.Typeface) + len(k.locale.Language)
+	bytes += cap(d.lines) * int(unsafe.Sizeof(line{}))
+	for _, l := range d.lines {
+		bytes += cap(l.runs)*int(unsafe.Sizeof(runLayout{})) + cap(l.visualOrder)*int(unsafe.Sizeof(int(0)))
+		for _, r := range l.runs {
+			bytes += cap(r.Glyphs) * int(unsafe.Sizeof(glyph{}))
+		}
+	}
+	return bytes
+}
 
 type glyphValue[V any] struct {
 	v      V
@@ -124,6 +181,10 @@ func (c *glyphLRU[V]) Get(key uint64, gs []Glyph) (V, bool) {
 }
 
 func (c *glyphLRU[V]) Put(key uint64, glyphs []Glyph, v V) {
+	c.PutCost(key, glyphs, v, 0)
+}
+
+func (c *glyphLRU[V]) PutCost(key uint64, glyphs []Glyph, v V, bytes int) {
 	gids := make([]glyphInfo, len(glyphs))
 	firstX := fixed.I(0)
 	for i, glyph := range glyphs {
@@ -131,13 +192,13 @@ func (c *glyphLRU[V]) Put(key uint64, glyphs []Glyph, v V) {
 			firstX = glyph.X
 		}
 		// Cache glyph X offsets relative to the first glyph.
-		gids[i] = glyphInfo{ID: glyph.ID, X: glyph.X - firstX}
+		gids[i] = glyphInfo{ID: glyph.ID, X: glyph.X - firstX, native: glyph.native}
 	}
 	val := glyphValue[V]{
 		glyphs: gids,
 		v:      v,
 	}
-	c.cache.Put(key, val)
+	c.cache.PutCost(key, val, bytes)
 }
 
 type pathCache = glyphLRU[clip.PathSpec]
@@ -147,6 +208,8 @@ type bitmapShapeCache = glyphLRU[op.CallOp]
 type glyphInfo struct {
 	ID GlyphID
 	X  fixed.Int26_6
+	// Preserve native IDs while their cached drawing operations are reusable.
+	native *nativeGlyph
 }
 
 type layoutKey struct {

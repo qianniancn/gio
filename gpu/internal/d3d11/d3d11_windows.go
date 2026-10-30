@@ -125,7 +125,6 @@ func newDirect3D11Device(api driver.Direct3D11) (driver.Device, error) {
 	featLvl := dev.GetFeatureLevel()
 	switch {
 	case featLvl < d3d11.FEATURE_LEVEL_9_1:
-		d3d11.IUnknownRelease(unsafe.Pointer(dev), dev.Vtbl.Release)
 		d3d11.IUnknownRelease(unsafe.Pointer(b.ctx), b.ctx.Vtbl.Release)
 		return nil, fmt.Errorf("d3d11: feature level too low: %d", featLvl)
 	case featLvl >= d3d11.FEATURE_LEVEL_11_0:
@@ -144,6 +143,7 @@ func newDirect3D11Device(api driver.Direct3D11) (driver.Device, error) {
 		FillMode: d3d11.FILL_SOLID,
 	})
 	if err != nil {
+		d3d11.IUnknownRelease(unsafe.Pointer(b.ctx), b.ctx.Vtbl.Release)
 		return nil, err
 	}
 	defer d3d11.IUnknownRelease(unsafe.Pointer(state), state.Vtbl.Release)
@@ -495,7 +495,7 @@ func (b *Backend) NewPipeline(desc driver.PipelineDesc) (driver.Pipeline, error)
 		var err error
 		layout, err = b.newInputLayout(vsh.src, l.Inputs)
 		if err != nil {
-			d3d11.IUnknownRelease(unsafe.Pointer(blend), blend.Vtbl.AddRef)
+			d3d11.IUnknownRelease(unsafe.Pointer(blend), blend.Vtbl.Release)
 			return nil, err
 		}
 	}

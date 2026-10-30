@@ -35,6 +35,30 @@ var english = system.Locale{
 	Direction: system.LTR,
 }
 
+func TestEditorNativeParagraphs(t *testing.T) {
+	for _, sample := range []string{"hello   \n世界\n", "a\u0301\nb", "العَرَبِيَّة\n123"} {
+		t.Run(sample, func(t *testing.T) {
+			shaper := text.NewShaper()
+			gtx := layout.Context{
+				Ops: new(op.Ops), Constraints: layout.Exact(image.Pt(300, 200)), Locale: english,
+			}
+			var editor Editor
+			editor.SetText(sample)
+			end := utf8.RuneCountInString(sample)
+			editor.SetCaret(end, end)
+			editor.Layout(gtx, shaper, font.Font{}, 16, op.CallOp{}, op.CallOp{})
+			start, stop := editor.Selection()
+			if editor.Len() != end || start != end || stop != end {
+				t.Fatalf("length=%d selection=(%d,%d), want end=%d", editor.Len(), start, stop, end)
+			}
+			editor.Insert("!")
+			if editor.Text() != sample+"!" {
+				t.Fatalf("insert at paragraph end: %q", editor.Text())
+			}
+		})
+	}
+}
+
 // TestEditorHistory ensures that undo and redo behave correctly.
 func TestEditorHistory(t *testing.T) {
 	e := new(Editor)

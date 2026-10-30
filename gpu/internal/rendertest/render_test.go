@@ -359,6 +359,33 @@ func TestImageRGBA(t *testing.T) {
 	})
 }
 
+func TestMaskRGBA(t *testing.T) {
+	for range 3 {
+		ops := new(op.Ops)
+		img, err := drawImage(t, 10, ops, func(o *op.Ops) {
+			mask := image.NewRGBA(image.Rect(0, 0, 2, 2))
+			for y := 0; y < 2; y++ {
+				for x := 0; x < 2; x++ {
+					mask.SetRGBA(x, y, color.RGBA{A: 255})
+				}
+			}
+			paint.ColorOp{Color: color.NRGBA{R: 255, A: 255}}.Add(o)
+			paint.NewMaskOp(mask).Add(o)
+			paint.PaintOp{}.Add(o)
+		})
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if got := img.RGBAAt(0, 0); !colorsClose(got, color.RGBA{R: 255, A: 255}) {
+			t.Errorf("mask pixel = %v, want opaque red", got)
+		}
+		if got := img.RGBAAt(2, 2); got.A != 0 {
+			t.Fatalf("mask painted outside its bounds: %v", got)
+		}
+	}
+}
+
 func TestImageRGBA_ScaleLinear(t *testing.T) {
 	run(t, func(o *op.Ops) {
 		w := newWindow(t, 128, 128)
