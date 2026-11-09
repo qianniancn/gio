@@ -57,8 +57,23 @@ type pointerInfo struct {
 	// entered tracks the tags that contain the pointer.
 	entered []event.Tag
 
-	dataSource event.Tag // dragging source tag
-	dataTarget event.Tag // dragging target tag
+	transfer transferState
+}
+
+type transferState struct {
+	source        event.Tag // nil for an external source
+	target        event.Tag
+	externalTypes []string
+}
+
+func (t transferState) sourceTypes(handlers map[event.Tag]*handler) []string {
+	if t.source == nil {
+		return t.externalTypes
+	}
+	if h, ok := handlers[t.source]; ok {
+		return h.filter.pointer.sourceMimes
+	}
+	return nil
 }
 
 type pointerHandler struct {
@@ -399,25 +414,44 @@ func (c *pointerCollector) cursor(cursor pointer.Cursor) {
 	area.cursor = cursor
 }
 
-func (q *pointerQueue) offerData(handlers map[event.Tag]*handler, state pointerState, req transfer.OfferCmd) (pointerState, []taggedEvent) {
+func (q *pointerQueue) drop(handlers map[event.Tag]*handler, e DropEvent) []taggedEvent {
+	t := transferState{externalTypes: []string{e.Type}}
+	evts := q.initiateTransfer(handlers, t, nil)
+	var targets []event.Tag
+	q.hitTest(e.Position, func(n *hitNode) bool {
+		if _, ok := handlers[n.tag]; ok {
+			targets = addHandler(targets, n.tag)
+		}
+		return true
+	})
+	t.target, _ = q.transferTarget(handlers, t, targets)
+	_, evts = q.offerData(handlers, t, transfer.DataEvent{Type: e.Type, Open: e.Open}, evts)
+	return evts
+}
+
+func (q *pointerQueue) offer(handlers map[event.Tag]*handler, state pointerState, req transfer.OfferCmd) (pointerState, []taggedEvent) {
 	var evts []taggedEvent
 	for i, p := range state.pointers {
-		if p.dataSource != req.Tag {
+		if p.transfer.source == nil || p.transfer.source != req.Tag {
 			continue
 		}
-		if p.dataTarget != nil {
-			evts = append(evts, taggedEvent{tag: p.dataTarget, event: transfer.DataEvent{
-				Type: req.Type,
-				Open: func() io.ReadCloser {
-					return req.Data
-				},
-			}})
-		}
 		state.pointers = slices.Clone(state.pointers)
-		state.pointers[i], evts = q.deliverTransferCancelEvent(handlers, p, evts)
+		state.pointers[i].transfer, evts = q.offerData(handlers, p.transfer, transfer.DataEvent{
+			Type: req.Type,
+			Open: func() io.ReadCloser {
+				return req.Data
+			},
+		}, evts)
 		break
 	}
 	return state, evts
+}
+
+func (q *pointerQueue) offerData(handlers map[event.Tag]*handler, t transferState, data transfer.DataEvent, evts []taggedEvent) (transferState, []taggedEvent) {
+	if t.target != nil {
+		evts = append(evts, taggedEvent{tag: t.target, event: data})
+	}
+	return q.cancelTransfer(handlers, t, evts)
 }
 
 func (c *pointerCollector) Reset() {
@@ -828,10 +862,7 @@ func (q *pointerQueue) deliverEnterLeaveEvents(handlers map[event.Tag]*handler, 
 	if e.Kind == pointer.Leave || e.Source != pointer.Mouse && !p.pressed && e.Kind != pointer.Press {
 		// Consider non-mouse pointers leaving when they're released.
 	} else {
-		var transSrc *pointerFilter
-		if p.dataSource != nil {
-			transSrc = &handlers[p.dataSource].filter.pointer
-		}
+		sourceTypes := p.transfer.sourceTypes(handlers)
 		cursor = q.hitTest(e.Position, func(n *hitNode) bool {
 			h, ok := handlers[n.tag]
 			if !ok {
@@ -845,10 +876,8 @@ func (q *pointerQueue) deliverEnterLeaveEvents(handlers map[event.Tag]*handler, 
 				if _, found := searchTag(p.handlers, n.tag); found {
 					add = true
 				}
-				if transSrc != nil {
-					if _, ok := firstMimeMatch(transSrc, &h.filter.pointer); ok {
-						add = true
-					}
+				if _, ok := firstMimeMatch(sourceTypes, &h.filter.pointer); ok {
+					add = true
 				}
 			}
 			if add {
@@ -902,7 +931,7 @@ func (q *pointerQueue) deliverEnterLeaveEvents(handlers map[event.Tag]*handler, 
 }
 
 func (q *pointerQueue) deliverDragEvent(handlers map[event.Tag]*handler, p pointerInfo, evts []taggedEvent) (pointerInfo, []taggedEvent) {
-	if p.dataSource != nil {
+	if p.transfer.source != nil {
 		return p, evts
 	}
 	// Identify the data source.
@@ -912,48 +941,62 @@ func (q *pointerQueue) deliverDragEvent(handlers map[event.Tag]*handler, p point
 			continue
 		}
 		// One data source handler per pointer.
-		p.dataSource = k
-		// Notify all potential targets.
-		for k, tgt := range handlers {
-			if _, ok := firstMimeMatch(src, &tgt.filter.pointer); ok {
-				evts = append(evts, taggedEvent{tag: k, event: transfer.InitiateEvent{}})
-			}
-		}
+		p.transfer = transferState{source: k}
+		evts = q.initiateTransfer(handlers, p.transfer, evts)
 		break
 	}
 	return p, evts
 }
 
 func (q *pointerQueue) deliverDropEvent(handlers map[event.Tag]*handler, p pointerInfo, evts []taggedEvent) (pointerInfo, []taggedEvent) {
-	if p.dataSource == nil {
+	if p.transfer.source == nil {
 		return p, evts
 	}
-	// Request data from the source.
-	src := &handlers[p.dataSource].filter.pointer
-	for _, k := range p.entered {
-		h := handlers[k]
-		if m, ok := firstMimeMatch(src, &h.filter.pointer); ok {
-			p.dataTarget = k
-			evts = append(evts, taggedEvent{tag: p.dataSource, event: transfer.RequestEvent{Type: m}})
-			return p, evts
-		}
+	var mime string
+	p.transfer.target, mime = q.transferTarget(handlers, p.transfer, p.entered)
+	if p.transfer.target != nil {
+		evts = append(evts, taggedEvent{tag: p.transfer.source, event: transfer.RequestEvent{Type: mime}})
+	} else {
+		p.transfer, evts = q.cancelTransfer(handlers, p.transfer, evts)
 	}
-	// No valid target found, abort.
-	return q.deliverTransferCancelEvent(handlers, p, evts)
+	return p, evts
 }
 
-func (q *pointerQueue) deliverTransferCancelEvent(handlers map[event.Tag]*handler, p pointerInfo, evts []taggedEvent) (pointerInfo, []taggedEvent) {
-	evts = append(evts, taggedEvent{tag: p.dataSource, event: transfer.CancelEvent{}})
-	// Cancel all potential targets.
-	src := &handlers[p.dataSource].filter.pointer
+func (q *pointerQueue) initiateTransfer(handlers map[event.Tag]*handler, t transferState, evts []taggedEvent) []taggedEvent {
+	types := t.sourceTypes(handlers)
 	for k, h := range handlers {
-		if _, ok := firstMimeMatch(src, &h.filter.pointer); ok {
+		if _, ok := firstMimeMatch(types, &h.filter.pointer); ok {
+			evts = append(evts, taggedEvent{tag: k, event: transfer.InitiateEvent{}})
+		}
+	}
+	return evts
+}
+
+func (q *pointerQueue) transferTarget(handlers map[event.Tag]*handler, t transferState, targets []event.Tag) (event.Tag, string) {
+	types := t.sourceTypes(handlers)
+	for _, k := range targets {
+		h, ok := handlers[k]
+		if !ok {
+			continue
+		}
+		if mime, ok := firstMimeMatch(types, &h.filter.pointer); ok {
+			return k, mime
+		}
+	}
+	return nil, ""
+}
+
+func (q *pointerQueue) cancelTransfer(handlers map[event.Tag]*handler, t transferState, evts []taggedEvent) (transferState, []taggedEvent) {
+	if t.source != nil {
+		evts = append(evts, taggedEvent{tag: t.source, event: transfer.CancelEvent{}})
+	}
+	types := t.sourceTypes(handlers)
+	for k, h := range handlers {
+		if _, ok := firstMimeMatch(types, &h.filter.pointer); ok {
 			evts = append(evts, taggedEvent{tag: k, event: transfer.CancelEvent{}})
 		}
 	}
-	p.dataSource = nil
-	p.dataTarget = nil
-	return p, evts
+	return transferState{}, evts
 }
 
 // ClipFor clips r to the parents of area.
@@ -986,9 +1029,9 @@ func addHandler(tags []event.Tag, tag event.Tag) []event.Tag {
 }
 
 // firstMimeMatch returns the first type match between src and tgt.
-func firstMimeMatch(src, tgt *pointerFilter) (first string, matched bool) {
+func firstMimeMatch(src []string, tgt *pointerFilter) (first string, matched bool) {
 	for _, m1 := range tgt.targetMimes {
-		if slices.Contains(src.sourceMimes, m1) {
+		if slices.Contains(src, m1) {
 			return m1, true
 		}
 	}
